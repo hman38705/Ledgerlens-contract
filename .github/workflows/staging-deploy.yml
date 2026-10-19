@@ -210,6 +210,7 @@ jobs:
           CODE=$?
           set -e
           echo "staging-upgrade exit code: $CODE"
+          echo "upgrade_exit_code=$CODE" >> "$GITHUB_OUTPUT"
           if [ -f deploy/staging.json ]; then
             STATUS=$(python3 -c "import json;print(json.load(open('deploy/staging.json')).get('status','unknown'))")
             echo "staging_status=$STATUS" >> "$GITHUB_OUTPUT"
@@ -223,7 +224,45 @@ jobs:
 
       - name: Publish staging status file
         if: always()
+        env:
+          UPGRADE_OUTCOME: ${{ steps.upgrade.outcome }}
+          UPGRADE_EXIT_CODE: ${{ steps.upgrade.outputs.upgrade_exit_code }}
         run: |
+          # If the upgrade step failed before recording a terminal status, the
+          # status file still holds the placeholder ('pending' /
+          # 'proposed-pending'). Rewrite it with a real terminal outcome so the
+          # committed file and the failure notification never go stale.
+          if [ "$UPGRADE_OUTCOME" = "failure" ] && [ -f deploy/staging.json ]; then
+            python3 - <<'EOF'
+          import json, os, datetime, pathlib
+
+          path = pathlib.Path("deploy/staging.json")
+          data = json.loads(path.read_text())
+          status = data.get("status")
+          if status in ("pending", "proposed-pending"):
+              log = pathlib.Path("target/staging-evidence/staging-upgrade.log")
+              log_text = log.read_text(errors="replace") if log.exists() else ""
+              rolled_back = "rollback" in log_text.lower() and (
+                  "rollback succeeded" in log_text.lower()
+                  or "rolled back" in log_text.lower()
+                  or "rollback complete" in log_text.lower()
+              )
+              exit_code = os.environ.get("UPGRADE_EXIT_CODE") or "unknown"
+              data["status"] = "rolled-back" if rolled_back else "failed"
+              for key in ("health", "canary"):
+                  if key in data:
+                      data[key] = "fail"
+              data["note"] = (
+                  f"Upgrade step failed (exit code {exit_code}); "
+                  + ("previous WASM restored and re-verified by health checks."
+                     if rolled_back
+                     else "manual intervention required (see docs/staging-deployment.md § Rollback).")
+              )
+              data["last_deploy_utc"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+              path.write_text(json.dumps(data, indent=2) + "\n")
+              print(f"Rewrote stale staging status '{status}' -> '{data['status']}'.")
+          EOF
+          fi
           echo "── deploy/staging.json ──"
           cat deploy/staging.json
           python3 - <<'EOF'

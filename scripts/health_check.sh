@@ -18,10 +18,15 @@ NETWORK="${1:?ERROR: network argument is required (e.g. testnet, mainnet)}"
 CONTRACT_ID="${2:?ERROR: contract-id argument is required}"
 SOURCE_IDENTITY="${3:-health-check}"
 
+# CLI binary used for view calls. Defaults to `stellar` to match the rest of the
+# deployment pipeline (staging-upgrade.sh and the workflows); override with
+# STELLAR_CLI_BIN if a different binary name is installed.
+CLI_BIN="${STELLAR_CLI_BIN:-stellar}"
+
 FAILURES=0
 
 invoke() {
-  soroban contract invoke \
+  "$CLI_BIN" contract invoke \
     --id "$CONTRACT_ID" \
     --source "$SOURCE_IDENTITY" \
     --network "$NETWORK" \

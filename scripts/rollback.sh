@@ -8,6 +8,10 @@ DRY_RUN=false
 NON_INTERACTIVE=false
 POSITIONAL=()
 
+# CLI binary used for all contract invocations. Must match the rest of the
+# pipeline (staging-upgrade.sh uses `stellar`); override with STELLAR_CLI_BIN.
+CLI_BIN="${STELLAR_CLI_BIN:-stellar}"
+
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
@@ -65,15 +69,15 @@ log "Previous WASM SHA-256: $PREVIOUS_WASM_HASH"
 log "Step 1: Proposing rollback upgrade (previous WASM hash)"
 if [ "$DRY_RUN" = true ]; then
   ROLLBACK_PROPOSAL_ID="<PROPOSAL_ID_PLACEHOLDER>"
-  echo "[dry-run] soroban contract invoke --id $TARGET_CONTRACT_ID --source $ADMIN_IDENTITY --network $NETWORK -- propose_upgrade --admin-signers '[$ADMIN_IDENTITY]' --new-wasm-hash $PREVIOUS_WASM_HASH"
+  echo "[dry-run] $CLI_BIN contract invoke --id $TARGET_CONTRACT_ID --source $ADMIN_IDENTITY --network $NETWORK -- propose_upgrade --admin-signers '[$ADMIN_IDENTITY]' --new-wasm-hash $PREVIOUS_WASM_HASH"
 else
-  PROPOSAL_OUTPUT=$(soroban contract invoke \
+  PROPOSAL_OUTPUT=$("$CLI_BIN" contract invoke \
     --id "$TARGET_CONTRACT_ID" \
     --source "$ADMIN_IDENTITY" \
     --network "$NETWORK" \
     -- \
     propose_upgrade \
-    --admin-signers "$(soroban keys address "$ADMIN_IDENTITY" 2>/dev/null || echo '<ADMIN>')" \
+    --admin-signers "$("$CLI_BIN" keys address "$ADMIN_IDENTITY" 2>/dev/null || echo '<ADMIN>')" \
     --new-wasm-hash "$PREVIOUS_WASM_HASH" 2>&1)
   log "Proposal output: $PROPOSAL_OUTPUT"
 fi
@@ -81,7 +85,7 @@ fi
 # ── Step 2: Monitor the delay ─────────────────────────────────
 log "Step 2: Waiting for upgrade delay to elapse"
 log "   Check pending upgrade status with:"
-log "   soroban contract invoke --id $TARGET_CONTRACT_ID --source $ADMIN_IDENTITY --network $NETWORK -- get_pending_upgrade"
+log "   $CLI_BIN contract invoke --id $TARGET_CONTRACT_ID --source $ADMIN_IDENTITY --network $NETWORK -- get_pending_upgrade"
 log "   Execute only after executable_after has passed."
 
 # ── Step 3: Execute the rollback ──────────────────────────────
@@ -94,22 +98,22 @@ fi
 
 log "Step 3: Executing rollback upgrade"
 if [ "$DRY_RUN" = true ]; then
-  echo "[dry-run] soroban contract invoke --id $TARGET_CONTRACT_ID --source $ADMIN_IDENTITY --network $NETWORK -- execute_upgrade --admin-signers '[$ADMIN_IDENTITY]'"
+  echo "[dry-run] $CLI_BIN contract invoke --id $TARGET_CONTRACT_ID --source $ADMIN_IDENTITY --network $NETWORK -- execute_upgrade --admin-signers '[$ADMIN_IDENTITY]'"
 else
-  EXECUTE_OUTPUT=$(soroban contract invoke \
+  EXECUTE_OUTPUT=$("$CLI_BIN" contract invoke \
     --id "$TARGET_CONTRACT_ID" \
     --source "$ADMIN_IDENTITY" \
     --network "$NETWORK" \
     -- \
     execute_upgrade \
-    --admin-signers "$(soroban keys address "$ADMIN_IDENTITY" 2>/dev/null || echo '<ADMIN>')" 2>&1)
+    --admin-signers "$("$CLI_BIN" keys address "$ADMIN_IDENTITY" 2>/dev/null || echo '<ADMIN>')" 2>&1)
   log "Execute output: $EXECUTE_OUTPUT"
 fi
 
 # ── Step 4: Verify rollback ───────────────────────────────────
 log "Step 4: Verifying rollback"
 if [ "$DRY_RUN" = false ]; then
-  VERIFY_VERSION=$(soroban contract invoke \
+  VERIFY_VERSION=$("$CLI_BIN" contract invoke \
     --id "$TARGET_CONTRACT_ID" \
     --source "$ADMIN_IDENTITY" \
     --network "$NETWORK" \
@@ -123,7 +127,7 @@ if [ "$DRY_RUN" = false ]; then
 
   log "Rollback contract version: $VERIFY_VERSION"
 
-  VERIFY_ADMIN=$(soroban contract invoke \
+  VERIFY_ADMIN=$("$CLI_BIN" contract invoke \
     --id "$TARGET_CONTRACT_ID" \
     --source "$ADMIN_IDENTITY" \
     --network "$NETWORK" \

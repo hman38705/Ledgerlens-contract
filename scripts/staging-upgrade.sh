@@ -105,7 +105,67 @@ NEW_WASM_PATH="${4:?ERROR: new-wasm-path argument is required}"
 
 TS() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 log() { echo "[$(TS)] $*" | tee -a "$EVIDENCE_DIR/staging-upgrade.log"; }
-die() { echo "[$(TS)] ERROR: $*" | tee -a "$EVIDENCE_DIR/staging-upgrade.log" >&2; exit 1; }
+
+# write_status is defined before die so that every failure path can record a
+# terminal status. It is intentionally tolerant: a status-write failure must
+# never mask the original error, so callers ignore its exit code.
+write_status() {
+  # write_status <status> <health> <canary> <note>
+  local status="$1" health="$2" canary="$3" note="$4"
+  local version="unknown" commit_sha="${GITHUB_SHA:-unknown}" run_url="${GITHUB_RUN_URL:-unknown}"
+  if [ "$DRY_RUN" = false ]; then
+    version="$(invoke get_version 2>/dev/null || echo 'unknown')"
+  else
+    version="<VERSION>"
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    STAGING_STATUS_FILE="$STAGING_STATUS_FILE" python3 - "$status" "$health" "$canary" "$note" "$CONTRACT_ID" "$NETWORK" "$NEW_WASM_HASH" "$PREVIOUS_WASM_HASH" "$version" "$commit_sha" "$run_url" <<'EOF'
+import json, sys, datetime
+(status, health, canary, note, contract_id, network, wasm, prev_wasm, version, commit, run_url) = sys.argv[1:12]
+import os
+path = os.environ["STAGING_STATUS_FILE"]
+try:
+    with open(path) as f:
+        data = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    data = {}
+data.update({
+    "network": network,
+    "contract_id": contract_id,
+    "wasm_sha256": wasm,
+    "previous_wasm_sha256": prev_wasm,
+    "version": version,
+    "schema_version": data.get("schema_version", 4),
+    "status": status,
+    "health": health,
+    "canary": canary,
+    "note": note,
+    "commit_sha": commit,
+    "workflow_run_url": run_url,
+    "last_deploy_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+})
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+print(f"staging status -> {path}: {status}")
+EOF
+  else
+    log "WARN: python3 unavailable; skipping machine-readable status update ($status/$health/$canary: $note)"
+  fi
+}
+
+# die <message> [status] [health] [canary]
+# Always records a terminal status (default: failed) before exiting non-zero,
+# so a failing run never leaves deploy/staging.json at 'pending'.
+die() {
+  local msg="$1"
+  local status="${2:-failed}"
+  local health="${3:-fail}"
+  local canary="${4:-fail}"
+  echo "[$(TS)] ERROR: $msg" | tee -a "$EVIDENCE_DIR/staging-upgrade.log" >&2
+  write_status "$status" "$health" "$canary" "$msg" || true
+  exit 1
+}
 
 run() {
   if [ "$DRY_RUN" = true ]; then
@@ -167,51 +227,6 @@ invoke() {
     -- "$@"
 }
 
-write_status() {
-  # write_status <status> <health> <canary> <note>
-  local status="$1" health="$2" canary="$3" note="$4"
-  local version="unknown" commit_sha="${GITHUB_SHA:-unknown}" run_url="${GITHUB_RUN_URL:-unknown}"
-  if [ "$DRY_RUN" = false ]; then
-    version="$(invoke get_version 2>/dev/null || echo 'unknown')"
-  else
-    version="<VERSION>"
-  fi
-  if command -v python3 >/dev/null 2>&1; then
-    STAGING_STATUS_FILE="$STAGING_STATUS_FILE" python3 - "$status" "$health" "$canary" "$note" "$CONTRACT_ID" "$NETWORK" "$NEW_WASM_HASH" "$PREVIOUS_WASM_HASH" "$version" "$commit_sha" "$run_url" <<'EOF'
-import json, sys, datetime
-(status, health, canary, note, contract_id, network, wasm, prev_wasm, version, commit, run_url) = sys.argv[1:12]
-import os
-path = os.environ["STAGING_STATUS_FILE"]
-try:
-    with open(path) as f:
-        data = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
-    data = {}
-data.update({
-    "network": network,
-    "contract_id": contract_id,
-    "wasm_sha256": wasm,
-    "previous_wasm_sha256": prev_wasm,
-    "version": version,
-    "schema_version": data.get("schema_version", 4),
-    "status": status,
-    "health": health,
-    "canary": canary,
-    "note": note,
-    "commit_sha": commit,
-    "workflow_run_url": run_url,
-    "last_deploy_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-})
-with open(path, "w") as f:
-    json.dump(data, f, indent=2)
-    f.write("\n")
-print(f"staging status -> {path}: {status}")
-EOF
-  else
-    log "WARN: python3 unavailable; skipping machine-readable status update ($status/$health/$canary: $note)"
-  fi
-}
-
 rollback() {
   # rollback <reason> — propose + execute the previous WASM, then re-verify health.
   local reason="$1"
@@ -222,28 +237,28 @@ rollback() {
     else
       log "ERROR: no --previous-wasm configured; cannot roll back automatically"
     fi
-    write_status "failed" "fail" "fail" "rollback unavailable: $reason"
+    write_status "failed" "fail" "fail" "rollback unavailable: $reason" || true
     return 1
   fi
   log "Rolling back to $PREVIOUS_WASM ($PREVIOUS_WASM_HASH) via scripts/rollback.sh"
   if ! run bash "$SCRIPT_DIR/rollback.sh" --non-interactive \
       "$NETWORK" "$ADMIN_IDENTITY" "$CONTRACT_ID" "$PREVIOUS_WASM" >>"$EVIDENCE_DIR/staging-upgrade.log" 2>&1; then
     log "ERROR: rollback execution failed"
-    write_status "failed" "fail" "fail" "rollback failed after: $reason"
+    write_status "failed" "fail" "fail" "rollback failed after: $reason" || true
     return 1
   fi
   log "Rollback proposed/executed; re-running health checks to confirm restoration"
   if [ "$DRY_RUN" = false ]; then
     if bash "$SCRIPT_DIR/health_check.sh" "$NETWORK" "$CONTRACT_ID" "$HEALTH_SOURCE" >>"$EVIDENCE_DIR/staging-upgrade.log" 2>&1; then
       log "Post-rollback health checks PASSED — prior state restored"
-      write_status "rolled-back" "pass" "fail" "rolled back after: $reason"
+      write_status "rolled-back" "pass" "fail" "rolled back after: $reason" || true
     else
       log "ERROR: post-rollback health checks FAILED — manual intervention required"
-      write_status "failed" "fail" "fail" "post-rollback unhealthy after: $reason"
+      write_status "failed" "fail" "fail" "post-rollback unhealthy after: $reason" || true
       return 1
     fi
   else
-    write_status "rolled-back" "fail" "fail" "dry-run rollback after: $reason"
+    write_status "rolled-back" "fail" "fail" "dry-run rollback after: $reason" || true
   fi
   return 1
 }
@@ -252,7 +267,7 @@ rollback() {
 log "Step 1: baseline health check (pre-upgrade)"
 if [ "$DRY_RUN" = false ]; then
   if ! bash "$SCRIPT_DIR/health_check.sh" "$NETWORK" "$CONTRACT_ID" "$HEALTH_SOURCE" >>"$EVIDENCE_DIR/staging-upgrade.log" 2>&1; then
-    die "baseline health check failed — refusing to deploy onto an unhealthy staging instance"
+    die "baseline health check failed — refusing to deploy onto an unhealthy staging instance" "failed" "fail" "pending"
   fi
   BASELINE_VERSION="$(invoke get_version 2>/dev/null || echo 'unknown')"
   log "Baseline healthy (version=$BASELINE_VERSION)"
@@ -264,7 +279,7 @@ fi
 log "Step 2: proposing upgrade (standard proposal flow)"
 if ! PROPOSE_OUT="$(invoke propose_upgrade --admin-signers "[$ADMIN_ADDRESS]" --new-wasm-hash "$NEW_WASM_HASH" 2>&1)"; then
   echo "$PROPOSE_OUT" >>"$EVIDENCE_DIR/staging-upgrade.log" 2>&1 || true
-  die "propose_upgrade failed: $PROPOSE_OUT"
+  die "propose_upgrade failed: $PROPOSE_OUT" "failed" "pass" "fail"
 fi
 echo "$PROPOSE_OUT" >>"$EVIDENCE_DIR/staging-upgrade.log" 2>&1 || true
 log "Proposal recorded"
@@ -289,8 +304,13 @@ else
         break
       fi
       if [ "$NOW" -ge "$DEADLINE" ]; then
+        # Only report proposed-pending when the proposal is genuinely recorded
+        # on-chain; a failed/unreadable pending state is a terminal failure.
+        if [ "$PENDING" = "PENDING_READ_FAILED" ] || [ -z "$EXEC_AFTER" ]; then
+          die "could not confirm the recorded proposal within ${MAX_WAIT_SECS}s (pending state: $PENDING)" "failed" "pass" "fail"
+        fi
         log "Delay window not yet elapsed within ${MAX_WAIT_SECS}s — leaving proposal pending for the scheduled follow-up"
-        write_status "proposed-pending" "pass" "pending" "awaiting executable_after; proposal recorded"
+        write_status "proposed-pending" "pass" "pending" "awaiting executable_after; proposal recorded" || true
         exit 2
       fi
       sleep "$POLL_INTERVAL_SECS"
@@ -301,11 +321,11 @@ fi
 # ── Step 4: execute ─────────────────────────────────────────────────────────
 log "Step 4: executing upgrade"
 if [ "$NON_INTERACTIVE" = false ] && [ "$DRY_RUN" = false ]; then
-  die "refusing to execute a staging upgrade interactively from CD; re-run with --non-interactive"
+  die "refusing to execute a staging upgrade interactively from CD; re-run with --non-interactive" "failed" "pass" "pending"
 fi
 if ! EXEC_OUT="$(invoke execute_upgrade --admin-signers "[$ADMIN_ADDRESS]" 2>&1)"; then
   echo "$EXEC_OUT" >>"$EVIDENCE_DIR/staging-upgrade.log" 2>&1 || true
-  rollback "execute_upgrade failed: $EXEC_OUT"
+  rollback "execute_upgrade failed: $EXEC_OUT" || true
   exit 1
 fi
 echo "$EXEC_OUT" >>"$EVIDENCE_DIR/staging-upgrade.log" 2>&1 || true
@@ -319,25 +339,25 @@ if [ "$DRY_RUN" = false ]; then
   # must trigger the rollback path below, never a silent success.
   if [ "${STAGING_SMOKE_FAIL:-0}" = "1" ]; then
     log "STAGING_SMOKE_FAIL=1 — simulating post-deploy verification failure"
-    rollback "simulated verification failure (STAGING_SMOKE_FAIL=1)"
+    rollback "simulated verification failure (STAGING_SMOKE_FAIL=1)" || true
     exit 1
   fi
   if ! bash "$SCRIPT_DIR/health_check.sh" "$NETWORK" "$CONTRACT_ID" "$HEALTH_SOURCE" >>"$EVIDENCE_DIR/staging-upgrade.log" 2>&1; then
-    rollback "post-deploy health check failed"
+    rollback "post-deploy health check failed" || true
     exit 1
   fi
   log "Health checks passed"
   log "Step 6: canary verification (verify-deployment.sh)"
   if ! bash "$SCRIPT_DIR/verify-deployment.sh" "$NETWORK" "$CONTRACT_ID" "$ADMIN_IDENTITY" >>"$EVIDENCE_DIR/staging-upgrade.log" 2>&1; then
-    rollback "post-deploy canary verification failed"
+    rollback "post-deploy canary verification failed" || true
     exit 1
   fi
   log "Canary verification passed"
-  write_status "deployed" "pass" "pass" "upgrade verified on staging"
+  write_status "deployed" "pass" "pass" "upgrade verified on staging" || true
 else
   log "[dry-run] bash scripts/health_check.sh $NETWORK $CONTRACT_ID $HEALTH_SOURCE"
   log "[dry-run] bash scripts/verify-deployment.sh $NETWORK $CONTRACT_ID $ADMIN_IDENTITY"
-  write_status "deployed" "pass" "pass" "dry-run"
+  write_status "deployed" "pass" "pass" "dry-run" || true
 fi
 
 log "── Staging upgrade complete and verified ──"

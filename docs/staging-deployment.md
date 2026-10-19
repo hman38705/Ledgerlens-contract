@@ -77,6 +77,31 @@ suppresses CI, so the status commit cannot retrigger this pipeline).
 Integrators poll this file (or the `staging-deployment-evidence` run
 artifact) instead of asking operators for the current staging address.
 
+### Terminal status is always written
+
+`pending` is only the **initial placeholder** value. On **every** failure
+path the workflow rewrites `deploy/staging.json` to a terminal status before
+it exits — the file is **never left at `pending`** after a run:
+
+- `rolled-back` — the previous verified WASM was restored and re-verified by
+  the health checks (automatic recovery succeeded).
+- `failed` — rollback could not restore a healthy instance (or the failure
+  occurred before/outside the rollback path); manual intervention is
+  required (see §5 and §8).
+
+The status write is unconditional (`if: always()` semantics): it runs whether
+the deploy step succeeded, failed, or was cancelled, so a red run always
+leaves a machine-readable record behind.
+
+### Consistent `stellar` CLI usage
+
+The workflow and the scripts it drives (`health_check.sh`,
+`verify-deployment.sh`, `rollback.sh`, `staging-upgrade.sh`) all invoke the
+**`stellar` CLI** for on-chain interaction — the same binary and the same
+`--network`/identity flags — so health, canary, and rollback observe the
+exact instance the upgrade touched. Do not substitute a different client in
+one script; a mismatch would make verification meaningless.
+
 ## 4. The time-lock is honoured, not bypassed
 
 Staging uses the **same** `propose_upgrade` / `execute_upgrade` entrypoints
@@ -179,13 +204,20 @@ Rules:
 
 1. Download `staging-deployment-evidence` from the linked run; read
    `staging-upgrade.log` top-down (baseline → propose → execute → verify).
-2. If status is `rolled-back`: confirm post-rollback health passed in the
-   log, verify `deploy/staging.json` matches on-chain (`health_check.sh`
-   manually), then fix forward on a branch — the next merge redeploys.
-3. If status is `failed` or `proposed-pending` for >1 delay window: follow
+2. If status is `rolled-back`: the previous WASM was restored and
+   **re-verified healthy** automatically. Confirm post-rollback health passed
+   in the log, verify `deploy/staging.json` matches on-chain
+   (`health_check.sh` manually), then fix forward on a branch — the next
+   merge redeploys. No manual recovery is needed.
+3. If status is `failed`: automatic rollback did **not** restore a healthy
+   instance (or the run failed before rollback could run). Staging is in an
+   unknown/degraded state — treat it as an incident: follow
    `docs/incident-response-runbook.md` (freeze if needed, snapshots,
-   reconcile) before re-running.
-4. Close the loop on the issue with the root cause and the green run link.
+   reconcile) and run `rollback.sh` manually before re-running. Do not
+   assume the previous WASM is live.
+4. If status is `proposed-pending` for >1 delay window: the proposal never
+   executed; follow `docs/incident-response-runbook.md` before re-running.
+5. Close the loop on the issue with the root cause and the green run link.
 
 ### Local rehearsal (no network)
 

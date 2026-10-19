@@ -23,7 +23,11 @@ NETWORK="${1:?ERROR: network argument is required}"
 CONTRACT_ID="${2:?ERROR: contract-id argument is required}"
 ADMIN_IDENTITY="${3:?ERROR: admin-identity argument is required}"
 
-ADMIN_ADDRESS=$(soroban keys address "$ADMIN_IDENTITY" 2>/dev/null || echo "<ADMIN_ADDRESS>")
+# Use the same CLI binary as the rest of the pipeline (staging-upgrade.sh uses
+# `stellar`). Override with STELLAR_CLI_BIN if needed.
+CLI_BIN="${STELLAR_CLI_BIN:-stellar}"
+
+ADMIN_ADDRESS=$("$CLI_BIN" keys address "$ADMIN_IDENTITY" 2>/dev/null || echo "<ADMIN_ADDRESS>")
 
 log() {
   local ts
@@ -54,7 +58,7 @@ echo ""
 # ── 1. Basic state checks ──────────────────────────────
 log "1. Basic state checks"
 
-ADMIN=$(soroban contract invoke \
+ADMIN=$("$CLI_BIN" contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
@@ -66,7 +70,7 @@ else
   check "get_admin returns valid address" "FAIL"
 fi
 
-SERVICE=$(soroban contract invoke \
+SERVICE=$("$CLI_BIN" contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
@@ -78,7 +82,7 @@ else
   check "get_service returns valid address" "FAIL"
 fi
 
-VERSION=$(soroban contract invoke \
+VERSION=$("$CLI_BIN" contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
@@ -86,7 +90,7 @@ VERSION=$(soroban contract invoke \
   get_version 2>/dev/null || echo "0")
 check "get_version returns non-zero" "$VERSION"
 
-IS_PAUSED=$(soroban contract invoke \
+IS_PAUSED=$("$CLI_BIN" contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
@@ -99,7 +103,7 @@ else
   log "  WARN: Contract is paused (is_paused=$IS_PAUSED)"
 fi
 
-FINALITY_BUFFER=$(soroban contract invoke \
+FINALITY_BUFFER=$("$CLI_BIN" contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
@@ -107,7 +111,7 @@ FINALITY_BUFFER=$(soroban contract invoke \
   get_finality_buffer 2>/dev/null || echo "0")
 check "Finality buffer is configured" "$FINALITY_BUFFER"
 
-COOLDOWN=$(soroban contract invoke \
+COOLDOWN=$("$CLI_BIN" contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
@@ -115,7 +119,7 @@ COOLDOWN=$(soroban contract invoke \
   get_cooldown 2>/dev/null || echo "0")
 check "Cooldown is configured" "$COOLDOWN"
 
-UPGRADE_DELAY=$(soroban contract invoke \
+UPGRADE_DELAY=$("$CLI_BIN" contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
@@ -132,7 +136,7 @@ TEST_WALLET="TEST_WALLET_SMOKE"
 TEST_PAIR="SMOKE_TEST_PAIR"
 TEST_TIMESTAMP=$(date +%s)
 
-SUBMIT_RESULT=$(soroban contract invoke \
+SUBMIT_RESULT=$("$CLI_BIN" contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
@@ -156,7 +160,7 @@ else
   check "Smoke test score submission succeeded" "$SUBMIT_RESULT"
 fi
 
-SCORE=$(soroban contract invoke \
+SCORE=$("$CLI_BIN" contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
@@ -170,7 +174,7 @@ echo ""
 
 # ── 3. Pending upgrade check ───────────────────────────
 log "3. Pending upgrade check"
-PENDING_UPGRADE=$(soroban contract invoke \
+PENDING_UPGRADE=$("$CLI_BIN" contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
@@ -187,7 +191,7 @@ echo ""
 
 # ── 4. Service set check ──────────────────────────────
 log "4. Service configuration check"
-SERVICE_SET=$(soroban contract invoke \
+SERVICE_SET=$("$CLI_BIN" contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
@@ -195,7 +199,7 @@ SERVICE_SET=$(soroban contract invoke \
   get_service_signers 2>/dev/null || echo "NONE")
 check "Service signers are configured" "$SERVICE_SET"
 
-SERVICE_THRESHOLD=$(soroban contract invoke \
+SERVICE_THRESHOLD=$("$CLI_BIN" contract invoke \
   --id "$CONTRACT_ID" \
   --source "$ADMIN_IDENTITY" \
   --network "$NETWORK" \
